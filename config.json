@@ -1,0 +1,26 @@
+{
+  "source": 0,
+  "camera_id": "c920_food",
+  "width": 1280,
+  "height": 720,
+  "capture_fps": 10,
+  "inference_fps": 2,
+  "imgsz": 640,
+  "device": "cpu",
+  "model": "data/yolo26n-seg.pt",
+  "confidence": 0.45,
+  "zone": null,
+  "zone_min_mask_fraction": 0.08,
+  "min_observed_seconds": 3.0,
+  "exit_grace_seconds": 3.0,
+  "identity_max_distance": 0.55,
+  "identity_margin": 0.12,
+  "identity_vote_ratio": 0.8,
+  "cats": [
+    "冲冲",
+    "白猫"
+  ],
+  "db": "data/events.sqlite3",
+  "profiles": "data/profiles.json",
+  "status": "data/status.json"
+}

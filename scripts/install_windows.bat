@@ -25,7 +25,7 @@ if errorlevel 1 goto failed
 if errorlevel 1 goto failed
 .venv\Scripts\python.exe -m pip freeze > data\windows-installed.txt
 if errorlevel 1 goto failed
-echo Installation and GPU checks passed. See WINDOWS_SETUP.md for camera setup.
+echo Installation and GPU checks passed. See PROJECT_STATUS.md for camera setup.
 pause
 exit /b 0
 :failed

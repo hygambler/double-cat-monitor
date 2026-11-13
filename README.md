@@ -1,5 +1,7 @@
 # 冲冲与白猫 · 家庭吃猫粮监测
 
+完整产品目标与分阶段设计见 [双猫生活行为监测架构](docs/PRODUCT_ARCHITECTURE.md)（2026-11-13）：低功耗、故障恢复、多站点、手机工作台及可选主动追踪。该文档记录新增长期目标，实施状态以 PROJECT_STATUS.md 为准。
+
 下一步研究与实施建议见 [夜间身份连续性与轨迹级识别](docs/NEXT_STEPS_RESEARCH.md)（2026-11-13）。由 **Mac 端 agent（Codex）** 整理；Mac 与 PC 两端 agent 将共同参与后续算法设计、代码更新、测试和文档维护。推荐方案尚未实现，现场验收在 Windows PC 上完成。
 
 当前 Windows PC 版本的功能、运行命令、夜间样本验证和待验收事项见 [项目说明与进展](PROJECT_STATUS.md)。本页后续内容包含早期 Mac 部署流程。

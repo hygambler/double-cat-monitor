@@ -1,5 +1,7 @@
 # 冲冲与白猫 · 家庭吃猫粮监测
 
+下一步研究与实施建议见 [夜间身份连续性与轨迹级识别](docs/NEXT_STEPS_RESEARCH.md)（2026-11-13）。由 **Mac 端 agent（Codex）** 整理；Mac 与 PC 两端 agent 将共同参与后续算法设计、代码更新、测试和文档维护。推荐方案尚未实现，现场验收在 Windows PC 上完成。
+
 当前 Windows PC 版本的功能、运行命令、夜间样本验证和待验收事项见 [项目说明与进展](PROJECT_STATUS.md)。本页后续内容包含早期 Mac 部署流程。
 
 第一阶段只用现有 **MacBook Air + Logitech C920 Pro USB 摄像头**。本地 Python/OpenCV → YOLO 猫实例分割 → 现场毛色样本匹配 → 区域事件状态机 → SQLite → Streamlit。无需购买硬件，无需云端 AI 服务或 API Key。

@@ -32,10 +32,15 @@ def test_dashboard_stats_and_review(tmp_path, monkeypatch):
     inside = in_zone(mask, [0, 0, 1, 1], config["zone_min_mask_fraction"])
     publish_preview(preview_path(config["status"]), frame, time.time(),
                     [{"index": 1, "cat": "冲冲", "in_zone": inside}], .032)
+    (tmp_path / "status.json").write_text(json.dumps({
+        "updated": time.time(), "state": "running", "active": True,
+        "active_identity": "白猫", "zone_identities": [],
+    }), encoding="utf-8")
     app.run()
     assert not app.exception
     assert {metric.label: metric.value for metric in app.metric}["候选进食"] == "1"
-    assert {metric.label: metric.value for metric in app.metric}["当前画面中的猫"] == "1"
+    assert {metric.label: metric.value for metric in app.metric}["本帧检测到的猫"] == "1"
+    assert any("当前进食候选 · **白猫**" in item.value for item in app.markdown)
     assert any("冲冲" in item.value and "在吃猫粮区" in item.value for item in app.markdown)
     app.selectbox(key="review_result").select("confirmed_eating")
     app.selectbox(key="review_cat").select("白猫")

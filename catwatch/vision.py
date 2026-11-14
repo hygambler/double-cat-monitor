@@ -106,16 +106,29 @@ class Detector:
         self.cat_class = next(int(k) for k, name in self.model.names.items() if name == "cat")
 
     def detect(self, frame):
-        r = self.model.predict(frame, classes=[self.cat_class], conf=self.c["confidence"],
+        return [detection[:2] for detection in self._detect(frame)]
+
+    def detect_tracked(self, frame, tracker):
+        return self._detect(frame, tracker)
+
+    def _detect(self, frame, tracker=None):
+        confidence = self.c["confidence"] if tracker is None else min(.10, self.c["confidence"])
+        r = self.model.predict(frame, classes=[self.cat_class], conf=confidence,
                                imgsz=self.c["imgsz"], device=self.c["device"],
                                retina_masks=True, verbose=False)[0]
+        tracks = tracker.update(r.boxes.cpu().numpy()) if tracker is not None else {}
         if r.masks is None:
             return []
         h, w = frame.shape[:2]
         result = []
-        for box, mask in zip(r.boxes.xyxy.cpu().numpy(), r.masks.data.cpu().numpy()):
+        for index, (box, mask, score) in enumerate(zip(r.boxes.xyxy.cpu().numpy(),
+                r.masks.data.cpu().numpy(), r.boxes.conf.cpu().numpy())):
+            track_id = tracks.get(index)
+            reliable = bool(score >= self.c["confidence"])
+            if not reliable and track_id is None:
+                continue
             mask = cv2.resize(mask, (w, h), interpolation=cv2.INTER_NEAREST) > .5
-            result.append((box.astype(int), mask.astype(np.uint8)))
+            result.append((box.astype(int), mask.astype(np.uint8), track_id, reliable))
         return result
 
 

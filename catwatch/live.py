@@ -41,3 +41,27 @@ def publish_preview(path, frame, captured_at, detections, elapsed):
         except PermissionError:
             # On Windows a concurrent read can briefly prevent atomic replacement.
             pass
+
+
+def encode_event_snapshot(frame, detections, zone):
+    import cv2
+    import numpy as np
+
+    height, width = frame.shape[:2]
+    annotated = frame.copy()
+    overlay = frame.copy()
+    for _, mask, _, _ in detections:
+        overlay[mask != 0] = (60, 200, 80)
+    cv2.addWeighted(overlay, .34, annotated, .66, 0, dst=annotated)
+    for index, (box, mask, track_id, _) in enumerate(detections, start=1):
+        contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(annotated, contours, -1, (60, 225, 80), 2)
+        x1, y1, x2, y2 = box
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 200, 255), 2)
+        label = f"ByteTrack #{track_id}" if track_id is not None else f"YOLO #{index}"
+        cv2.putText(annotated, label, (x1, max(24, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX,
+                    .7, (0, 200, 255), 2, cv2.LINE_AA)
+    x1, y1, x2, y2 = [int(v * size) for v, size in zip(zone, (width, height, width, height))]
+    cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 180, 0), 2)
+    ok, encoded = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    return encoded.tobytes() if ok else None

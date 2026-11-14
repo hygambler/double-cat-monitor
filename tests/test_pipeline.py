@@ -34,8 +34,12 @@ def test_video_pipeline_media_time_and_two_cats(tmp_path, monkeypatch):
     run(c, video=str(path))
     with sqlite3.connect(c["db"]) as conn:
         events = conn.execute("SELECT cat, observed_seconds, end_reason FROM events ORDER BY id").fetchall()
+        snapshots = conn.execute("SELECT snapshot_jpeg, snapshot_ts-start_ts FROM events ORDER BY id").fetchall()
     assert [e[0] for e in events] == c["cats"]
     assert 5 <= events[0][1] <= 6
     assert events[0][2] == "left_zone"
     assert events[1][2] == "stopped"
+    for jpeg, offset in snapshots:
+        assert offset == 5
+        assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR).shape == (64, 64, 3)
     assert json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))["state"] == "stopped"

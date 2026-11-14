@@ -9,6 +9,7 @@
   "device": "0",
   "model": "data/yolo26n-seg.pt",
   "confidence": 0.45,
+  "bytetrack": true,
   "zone": [
     0.3375,
     0.3425925925925926,
@@ -18,12 +19,14 @@
   "zone_min_mask_fraction": 0.08,
   "min_observed_seconds": 3.0,
   "exit_grace_seconds": 3.0,
+  "night_exit_grace_seconds": 10.0,
   "identity_max_distance": 0.55,
   "identity_margin": 0.12,
   "identity_min_scene_luma": 35,
   "night_min_scene_luma": 24,
   "night_max_scene_luma": 75,
   "identity_vote_ratio": 0.8,
+  "night_identity_vote_ratio": 0.6,
   "cats": [
     "冲冲",
     "白猫"

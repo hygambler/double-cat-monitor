@@ -1,6 +1,6 @@
 # 双猫生活行为监测 · PROJECT STATUS
 
-更新于 2026-11-13（北京时间）。项目背景、11 个代码模块与后续路线见 [ROADMAP.md](ROADMAP.md)。
+更新于 2026-11-14（北京时间）。项目背景、11 个代码模块与后续路线见 [ROADMAP.md](ROADMAP.md)。
 
 ## 进展时间线
 
@@ -13,13 +13,62 @@
 | 11-12 22:34 · PC 连续性修正 | 夜间宽限由 3 秒增至 10 秒，事件身份门槛由 80% 降至 60%。看板同时展示逐帧身份和事件暂定身份，28 项测试通过。 | 修正上线后至停机没有新增入库事件，实际进食效果待验证。 |
 | 11-12 22:51:29 · 异常中断 | 状态文件记下 `PermissionError`，首轮未跑完整夜。 | 当晚只保留异常类型，无法确认持有文件的具体进程。 |
 | 11-13 · PC 修复与复测 | 用同一个写入函数在 Windows 复现：读者打开 `status.json` 时替换可报 WinError 5。PC 本地加入有限重试，持续占用时跳过该次心跳，下一次继续写；其他退出尽可能保留异常详情。29 项测试通过，真实文件占用与解除后恢复写入已验证；C920 短测完成取帧与正常退出。 | 正式采集尚未重启，整夜复测待做。 |
+| 11-13～14 · 第一次正式测试 | 清零后从 21:57 开始，22:54 保存一条 39.5 秒的未知身份事件。现场确认夜灯随后异常关闭，画面进入无灯光状态。系统于 11 月 14 日 02:43 随电脑意外关机停止。 | 无光阶段不具备用 C920 验证 YOLO、ByteTrack 或毛色身份识别的条件，本次不能作为正常夜间灯光准确率结论。 |
+| 11-13～14 · ByteTrack 与事件截图 | 接入 ByteTrack，低分检测可续接已有轨迹；同一轨迹的可靠身份可短时延续。候选进食累计 5 秒有效观测且身份已确认时，把带 YOLO 分割、ByteTrack 框和粮区框的 JPEG 写入事件。白猫现场事件 #2、#3 已成功保存截图。回归测试增至 33 项。 | 仍需在夜灯稳定开启的整晚测试中核对错名、未知、断轨、事件拆分和截图覆盖率。 |
 | 11-13 · Mac / PC 文档接续 | Mac 梳理了夜间轨迹方案、长期产品架构和 11 模块代码地图，已并入 [路线图](ROADMAP.md)。 | 逐帧诊断、ByteTrack 和轨迹级融合仍是计划。 |
 
 ## 代码版本与运行状态
 
-GitHub 当前运行代码以 [`454498d`](https://github.com/hygambler/double-cat-monitor/commit/454498dbbe501eed0da5d383e5b7647c81b0275c) 为基线，其夜间事件仍按 3 秒宽限与 80% 投票处理。上述连续性与心跳修正已在 Windows PC 本地验证，**尚未同步到 GitHub**。两端做实验时记录实际使用的代码版本。
+一次候选进食累计至少 5 秒有效观测，且当前画面与事件身份一致时，抓取一帧，叠加 YOLO 分割轮廓、ByteTrack 框与轨迹编号、粮区蓝框。事件结算时将 JPEG 和拍摄时间一并写入 SQLite，工作台可按事件编号查看。回放和白猫现场事件均已验证截图入库。
 
-Windows 工作台可单独启动来查看历史。关闭浏览器标签不会停止已经启动的采集。一体化模式的采集终端或 Streamlit 服务退出时，监控也会结束。
+ByteTrack 的低分检测只可续接既有轨迹，且仅能延续已有的粮区事件。可靠身份在同一轨迹上经三次同名识别后可延续最多五秒，沿用结果不重复计作身份票。可信检测显示同一轨迹离开粮区时结算事件；粮区出现明确的另一个轨迹编号时也分段。完全漏检时维持原有宽限，漏检时长不计入有效观测。看板显示轨迹编号及身份沿用状态。
+
+本次同步把 Windows PC 已验证的夜间连续性、心跳写入重试、ByteTrack、事件截图、依赖锁文件和 33 项测试推送到 GitHub `main`。猫照片、身份特征、SQLite 记录和模型权重继续保存在本机。
+
+## 本地服务器、监控与工作台
+
+项目中的“本地服务器”是 Streamlit 后台，只监听本机 `127.0.0.1:8501`。工作台是浏览器访问该服务器后显示的页面。浏览器负责展示实时画面、状态、SQLite 统计、人工复核和截图，本身不控制摄像头、不运行 YOLO，也不直接保存事件。
+
+正式监控使用 [`scripts/webapp_windows.bat`](scripts/webapp_windows.bat)。无需打开 Codex，双击该脚本即可执行 `python -m catwatch --config config.windows.json web`。该命令在同一个启动终端中运行采集、YOLO、ByteTrack、事件状态机和 SQLite，并启动 Streamlit 子进程。然后打开 [本机工作台](http://127.0.0.1:8501/)。
+
+- 关闭浏览器标签或浏览器，不影响已经运行的监控。
+- 保持启动脚本弹出的终端窗口运行。终端中按 Ctrl+C、关闭终端或停止 Streamlit 后台，会结束一体化监控。
+- 电脑睡眠、关机或重启会中断采集。恢复后重新双击 `webapp_windows.bat`。
+- 如果本地服务已经运行，只打开工作台地址即可。重复启动会因端口或采集锁冲突而失败。
+- [`scripts/monitor_windows.bat`](scripts/monitor_windows.bat) 只运行带 OpenCV 预览窗口的采集，适合现场调试。
+- [`scripts/dashboard_windows.bat`](scripts/dashboard_windows.bat) 会生成独立模拟库并运行展示页，用于界面演示。正式监控使用 `webapp_windows.bat`。
+
+```text
+C920 → YOLO 分割 → ByteTrack → 身份与粮区事件 → data/events.sqlite3
+                                                       ↓
+采集进程 → data/status.live.json → Streamlit 127.0.0.1:8501 → 浏览器工作台
+```
+
+## 数据地址与格式
+
+项目根目录为 `C:\Users\yuhey\Documents\Codex\2026-11-10\new-chat\work\cat-water-monitor`。运行数据位于其 `data\` 子目录，并由 `.gitignore` 排除，不会随源码推送到 GitHub。
+
+| 地址 | 格式 | 内容与使用方式 |
+| --- | --- | --- |
+| `data/events.sqlite3` | SQLite 3 | 正式候选进食事件、模型身份、人工复核、有效观测时长。截图保存在 `events.snapshot_jpeg` BLOB，时间在 `snapshot_ts`；可用工作台或 DB Browser 查看。 |
+| `data/events.sqlite3-wal`、`-shm` | SQLite WAL 临时文件 | 监控运行时的事务日志和共享内存。备份时使用 SQLite backup API，或停机后复制主库；不要只复制运行中的主文件。 |
+| `data/backups/*.sqlite3` | SQLite 3 | 人工清零或阶段测试前保存的历史数据库备份。 |
+| `data/demo.sqlite3` | SQLite 3 | 工作台演示数据，与正式记录隔离。 |
+| `data/profiles.json` | JSON 数值数组 | 冲冲和白猫的日间 LAB 毛色与相对花纹特征。 |
+| `data/night-profiles.json` | JSON 数值数组 | 两只猫的夜间身份特征。当前本机冲冲、白猫各 6 张有效样本。 |
+| `data/calibration/**/*.jpg` | JPEG | C920 采集的日间、夜间单猫校准照片。部分人工复核拼图为 PNG。 |
+| `data/yolo26n-seg.pt` | PyTorch 权重 | YOLO26 nano 分割模型。体积较大，部署时单独准备，不上传本仓库。 |
+| `data/status.json` | JSON | 采集心跳、运行状态、帧数、当前模式、亮度、活动事件和推理耗时。 |
+| `data/status.live.json` | JSON + Base64 JPEG | 工作台最近一帧预览、检测结果、轨迹信息和推理时间；持续覆盖，不是历史录像。 |
+| `data/status.alignment.json` | JSON + Base64 JPEG | 手动框选时的机位基准、粮区坐标和参考画面。 |
+| `data/status.alignment-switch.json` | JSON | 工作台的机位检查开关。对应 `.lock` 文件用于防止并发写入。 |
+| `data/status.focus-request.json`、`status.focus-result.json` | JSON | 工作台提交的焦点请求及 C920 回读结果。 |
+| `data/first-formal-test.json`、`night-trial-*.json` | JSON | 阶段测试的起点、配置和现场结论。 |
+| `data/windows-installed.txt` | UTF-8 文本 | Windows 环境安装完成时记录的 Python 包版本。 |
+| `config.windows.json` | JSON | C920、YOLO、日夜阈值、粮区、数据库和状态文件路径。 |
+| `.venv\` | Python 虚拟环境 | Windows 本机依赖和可执行文件，不上传 GitHub，也不能跨操作系统复制。 |
+
+源码由 `catwatch/*.py`、`dashboard.py`、`scripts/*.bat`、配置、测试和 `uv.lock` 组成。GitHub 用于同步这些可复现文件；家庭画面、猫身份样本、事件截图和正式数据库只留在本机。
 
 ## 现场规则
 

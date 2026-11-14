@@ -3,7 +3,7 @@ name = "cat-water-monitor"
 version = "0.1.0"
 description = "Local two-cat feeding-zone visit monitor"
 requires-python = ">=3.11,<3.14"
-dependencies = ["ultralytics>=8.3,<9", "opencv-python>=4.10,<5", "numpy>=1.26,<3", "streamlit>=1.40,<2", "pandas>=2.2,<3"]
+dependencies = ["ultralytics>=8.4.208,<9", "lap>=0.5.12,<1", "opencv-python>=4.10,<5", "numpy>=1.26,<3", "streamlit>=1.40,<2", "pandas>=2.2,<3"]
 
 [dependency-groups]
 dev = ["pytest>=8,<10"]

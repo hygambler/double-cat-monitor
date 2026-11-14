@@ -2,19 +2,32 @@
 from collections import Counter
 from pathlib import Path
 import json
+import logging
 import math
 import sqlite3
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 FEEDING_EVENT = "feeding_zone_visit"
 
 
-def atomic_json(path, value):
+def atomic_json(path, value, *, tolerate_busy_replace=False):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    temp.replace(path)
+    attempts = 4 if tolerate_busy_replace else 1
+    for attempt in range(attempts):
+        try:
+            temp.replace(path)
+            return
+        except PermissionError as exc:
+            if not tolerate_busy_replace or getattr(exc, "winerror", None) not in (5, 32, 33):
+                raise
+            if attempt == attempts - 1:
+                logging.warning("Status update skipped after %d attempts: %s", attempts, exc)
+                return
+            time.sleep(.02 * (attempt + 1))
 
 
 def load_config(path=None):
@@ -40,6 +53,13 @@ def load_config(path=None):
         if (not isinstance(night_min, (int, float)) or not isinstance(night_max, (int, float))
                 or not 0 <= night_min < night_max <= 255):
             raise ValueError("Night mode requires ordered luminance thresholds in [0,255]")
+        night_grace = c.get("night_exit_grace_seconds", c["exit_grace_seconds"])
+        if (not isinstance(night_grace, (int, float)) or not math.isfinite(night_grace)
+                or night_grace < c["exit_grace_seconds"]):
+            raise ValueError("Night exit grace must be finite and at least the normal exit grace")
+        night_vote = c.get("night_identity_vote_ratio", c["identity_vote_ratio"])
+        if not isinstance(night_vote, (int, float)) or not 0 < night_vote <= 1:
+            raise ValueError("night_identity_vote_ratio must be in (0,1]")
     if len(c["cats"]) != 2 or len(set(c["cats"])) != 2 or "unknown" in c["cats"]:
         raise ValueError("Configure two distinct cat names, excluding 'unknown'")
     z = c["zone"]
@@ -59,7 +79,13 @@ class Store:
             end_ts REAL NOT NULL, observed_seconds REAL NOT NULL, cat TEXT NOT NULL,
             identity_ratio REAL NOT NULL, ambiguous INTEGER NOT NULL,
             end_reason TEXT NOT NULL, review TEXT NOT NULL DEFAULT 'pending',
-            kind TEXT NOT NULL DEFAULT 'water_zone_visit', reviewed_cat TEXT)''')
+            kind TEXT NOT NULL DEFAULT 'water_zone_visit', reviewed_cat TEXT,
+            snapshot_jpeg BLOB, snapshot_ts REAL)''')
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(events)")}
+        if "snapshot_jpeg" not in columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN snapshot_jpeg BLOB")
+        if "snapshot_ts" not in columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN snapshot_ts REAL")
         self.conn.execute("CREATE INDEX IF NOT EXISTS events_start ON events(start_ts)")
         self.conn.commit()
 
@@ -80,44 +106,78 @@ class VisitEngine:
     over the entire session, including unknown observations. Missing frames do
     not add observed seconds. Continuous identity handoffs are merged/unknown.
     """
-    def __init__(self, camera_id, minimum=3., grace=3., vote_ratio=.8, max_step=1.):
+    def __init__(self, camera_id, minimum=3., grace=3., vote_ratio=.8, max_step=1.,
+                 *, night_grace=None, night_vote_ratio=None):
         self.camera_id = camera_id
         self.minimum, self.grace, self.vote_ratio, self.max_step = minimum, grace, vote_ratio, max_step
+        self.night_grace = grace if night_grace is None else night_grace
+        self.night_vote_ratio = vote_ratio if night_vote_ratio is None else night_vote_ratio
         self.active = None
         self.previous_present = False
         self.previous_ts = None
+        self.signal_lost_since = None
 
-    def tick(self, ts, identities):
+    def tick(self, ts, identities, *, night=False, frame_available=True, inherited=False):
         if self.previous_ts is not None and ts < self.previous_ts:
             raise ValueError("timestamps must be monotonic")
         done = []
-        if self.active and ts - self.active["last"] > self.grace:
-            event = self.finish("left_zone")
-            if event:
-                done.append(event)
+        if not frame_available and self.signal_lost_since is None:
+            self.signal_lost_since = ts
+        if self.active:
+            grace = self.night_grace if self.active["night"] else self.grace
+            signal_lost = self.signal_lost_since is not None and ts - self.signal_lost_since >= self.grace
+            if signal_lost or ts - self.active["last"] > grace:
+                event = self.finish("no_signal" if signal_lost else "left_zone")
+                if event:
+                    done.append(event)
+        if frame_available:
+            self.signal_lost_since = None
         if identities:
             if self.active is None:
-                self.active = dict(start=ts, last=ts, observed=0., votes=Counter(), ambiguous=False)
+                self.active = dict(start=ts, last=ts, observed=0., votes=Counter(), ambiguous=False, night=night)
             a = self.active
             if self.previous_present and self.previous_ts is not None:
                 a["observed"] += min(ts - self.previous_ts, self.max_step)
             a["last"] = ts
             a["ambiguous"] |= len(identities) > 1
-            a["votes"][identities[0] if len(identities) == 1 else "unknown"] += 1
+            if not inherited or len(identities) != 1:
+                a["votes"][identities[0] if len(identities) == 1 else "unknown"] += 1
             a["ambiguous"] |= len(set(a["votes"]) - {"unknown"}) > 1
         self.previous_present, self.previous_ts = bool(identities), ts
         return done
 
+    def identity(self):
+        a = self.active
+        if a is None:
+            return None, None
+        if not a["votes"]:
+            return "unknown", 0.
+        cat, n = a["votes"].most_common(1)[0]
+        ratio = n / sum(a["votes"].values())
+        vote_ratio = self.night_vote_ratio if a["night"] else self.vote_ratio
+        if a["ambiguous"] or ratio < vote_ratio or n < 3:
+            cat = "unknown"
+        return cat, ratio
+
+    def snapshot_due(self, current_name):
+        return (self.active is not None and self.active["observed"] >= 5
+                and "snapshot_jpeg" not in self.active and current_name not in (None, "unknown")
+                and current_name == self.identity()[0])
+
+    def attach_snapshot(self, jpeg, captured_at):
+        self.active.update(snapshot_jpeg=jpeg, snapshot_ts=captured_at)
+
     def finish(self, reason="stopped"):
-        a, self.active = self.active, None
+        a = self.active
+        cat, ratio = self.identity()
+        self.active = None
         self.previous_present = False
         if a is None or a["observed"] < self.minimum:
             return None
-        cat, n = a["votes"].most_common(1)[0]
-        ratio = n / sum(a["votes"].values())
-        if a["ambiguous"] or ratio < self.vote_ratio or n < 3:
-            cat = "unknown"
-        return dict(camera_id=self.camera_id, start_ts=a["start"], end_ts=a["last"],
+        event = dict(camera_id=self.camera_id, start_ts=a["start"], end_ts=a["last"],
                     observed_seconds=round(a["observed"], 3), cat=cat,
                     identity_ratio=ratio, ambiguous=int(a["ambiguous"]), end_reason=reason,
                     kind=FEEDING_EVENT)
+        if "snapshot_jpeg" in a:
+            event.update(snapshot_jpeg=a["snapshot_jpeg"], snapshot_ts=a["snapshot_ts"])
+        return event

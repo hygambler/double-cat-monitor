@@ -1,6 +1,7 @@
 import argparse
 from collections import deque
 import json
+import logging
 import os
 from pathlib import Path
 import signal
@@ -122,7 +123,7 @@ def run(c, preview=False, video=None, seconds=None, web_preview=False, stop_requ
     import numpy as np
     from .capture import LiveCapture, open_capture
     from .alignment import Alignment
-    from .live import preview_path, publish_preview
+    from .live import encode_event_snapshot, preview_path, publish_preview
     from .vision import Detector, descriptor, identify, identify_night, in_zone, load_profiles, scene_luminance
     if c["zone"] is None:
         raise ValueError("请先执行 python -m catwatch setup 框选吃猫粮区。")
@@ -139,9 +140,17 @@ def run(c, preview=False, video=None, seconds=None, web_preview=False, stop_requ
         night_profiles = load_profiles(night_path, c["cats"]) if night_path else {}
         if not profiles:
             print("尚未完成双猫校准，先以 unknown 记录。")
-        store = Store(c["db"])
         engine = VisitEngine(c["camera_id"], c["min_observed_seconds"], c["exit_grace_seconds"],
-                             c["identity_vote_ratio"], max_step=1.5 / c["inference_fps"])
+                             c["identity_vote_ratio"], max_step=1.5 / c["inference_fps"],
+                             night_grace=c.get("night_exit_grace_seconds") if night_path else None,
+                             night_vote_ratio=c.get("night_identity_vote_ratio") if night_path else None)
+        tracker = None
+        if c.get("bytetrack", False):
+            from .tracking import CatTracker
+            tracker = CatTracker(c["confidence"], c["inference_fps"], engine.night_grace)
+        store = Store(c["db"])
+        zone_track = None
+        last_tracker_frame = None
         stopping = False
         def stop(*_):
             nonlocal stopping
@@ -160,6 +169,7 @@ def run(c, preview=False, video=None, seconds=None, web_preview=False, stop_requ
         night = False
         light_ok = True
         error = None
+        error_detail = None
         try:
             if video:
                 cap = open_capture(video, c)
@@ -193,16 +203,25 @@ def run(c, preview=False, video=None, seconds=None, web_preview=False, stop_requ
                     scene_luma = None
                     night = False
                     light_ok = True
-                    for event in engine.tick(ts, []):
+                    for event in engine.tick(ts, [], frame_available=False):
                         store.save(event)
                         saved += 1
                     last_identity = []
+                    if tracker and last_tracker_frame is not None and ts - last_tracker_frame >= engine.grace:
+                        tracker.reset()
+                        zone_track = last_tracker_frame = None
                 else:
                     if alignment:
                         checked = alignment.check(frame, now)
                         if not checked or zone != alignment.zone:
                             # A visit spanning a geometry change has unreliable timing.
-                            engine.finish("alignment_changed")
+                            event = engine.finish("alignment_changed")
+                            if event:
+                                store.save(event)
+                                saved += 1
+                            if tracker and last_tracker_frame is not None:
+                                tracker.reset()
+                                zone_track = last_tracker_frame = None
                         if alignment.status["state"] in ("severe", "unverified"):
                             alignment_stop = True
                             print("机位偏移过大或无法确认粮碗位置。已停止监控，请重新框选后手动启动。",
@@ -210,7 +229,14 @@ def run(c, preview=False, video=None, seconds=None, web_preview=False, stop_requ
                             break
                         zone = alignment.zone if checked else None
                     t0 = time.monotonic()
-                    detections = detector.detect(frame)
+                    if tracker:
+                        if last_tracker_frame is not None and ts - last_tracker_frame > engine.night_grace:
+                            tracker.reset()
+                            zone_track = None
+                        detections = detector.detect_tracked(frame, tracker)
+                        last_tracker_frame = ts
+                    else:
+                        detections = [(box, mask, None, True) for box, mask in detector.detect(frame)]
                     scene_luma = scene_luminance(frame) if min_scene_luma or night_path else None
                     night = bool(night_path and scene_luma <= c["night_max_scene_luma"])
                     light_limit = c["night_min_scene_luma"] if night else min_scene_luma
@@ -218,25 +244,73 @@ def run(c, preview=False, video=None, seconds=None, web_preview=False, stop_requ
                     identities = []
                     visual = frame.copy() if preview or live_path else None
                     display_results = []
-                    for index, (box, mask) in enumerate(detections, start=1):
-                        feature = descriptor(frame, mask) if light_ok else None
+                    observations = []
+                    for box, mask, track_id, reliable in detections:
+                        feature = descriptor(frame, mask) if light_ok and reliable else None
                         if night:
                             name = identify_night(feature, night_profiles)
                         else:
                             name, _ = identify(feature, profiles, c["identity_max_distance"], c["identity_margin"])
-                        inside = zone is not None and in_zone(mask, zone, c["zone_min_mask_fraction"])
+                        can_count = reliable or (track_id is not None and track_id == zone_track
+                                                 and engine.active is not None)
+                        inside = (can_count and zone is not None
+                                  and in_zone(mask, zone, c["zone_min_mask_fraction"]))
+                        observations.append((track_id, name, inside))
+                    resolved = (tracker.resolve(ts, [(track_id, name) for track_id, name, _ in observations])
+                                if tracker else [(name, False) for _, name, _ in observations])
+                    if zone_track is not None and any(
+                        track_id == zone_track and not inside and detection[3]
+                        for detection, (track_id, _, inside) in zip(detections, observations)
+                    ):
+                        event = engine.finish("left_zone")
+                        if event:
+                            store.save(event)
+                            saved += 1
+                        tracker.identities.pop(zone_track, None)
+                        zone_track = None
+                    zone_tracks = []
+                    inherited = False
+                    for index, (detection, observation, identity) in enumerate(
+                            zip(detections, observations, resolved), start=1):
+                        box, _, _, _ = detection
+                        track_id, raw_name, inside = observation
+                        name, carried = identity
                         if inside:
                             identities.append(name)
+                            zone_tracks.append(track_id)
+                            inherited = carried
                         if visual is not None:
                             x1, y1, x2, y2 = box
                             cv2.rectangle(visual, (x1, y1), (x2, y2), (60, 200, 80), 2)
                             label = f"#{index}" if live_path else (
                                 f"cat_{c['cats'].index(name)+1}" if name in c["cats"] else "unknown")
                             cv2.putText(visual, label, (x1, max(20, y1)), 0, .7, (60, 200, 80), 2)
-                            display_results.append({"index": index, "cat": name, "in_zone": inside})
-                    for event in engine.tick(ts, identities):
+                            display_results.append({"index": index, "cat": name, "in_zone": inside,
+                                                    "track_id": track_id, "raw_cat": raw_name,
+                                                    "inherited": carried})
+                    if (zone_track is not None and len(zone_tracks) == 1
+                            and zone_tracks[0] is not None and zone_tracks[0] != zone_track):
+                        event = engine.finish("track_changed")
+                        if event:
+                            store.save(event)
+                            saved += 1
+                    for event in engine.tick(ts, identities, night=night, inherited=inherited):
                         store.save(event)
                         saved += 1
+                    if (len(identities) == 1 and (tracker is None or zone_tracks[0] is not None)
+                            and engine.snapshot_due(identities[0])):
+                        try:
+                            jpeg = encode_event_snapshot(frame, detections, zone)
+                            if jpeg is not None:
+                                engine.attach_snapshot(jpeg, ts if video else packet[2])
+                        except cv2.error:
+                            logging.exception("Could not encode feeding event snapshot")
+                    if len(zone_tracks) == 1 and zone_tracks[0] is not None:
+                        zone_track = zone_tracks[0]
+                    elif len(zone_tracks) > 1:
+                        zone_track = None
+                    elif engine.active is None:
+                        zone_track = None
                     last_identity = identities
                     frames += 1
                     elapsed = time.monotonic() - t0
@@ -255,17 +329,21 @@ def run(c, preview=False, video=None, seconds=None, web_preview=False, stop_requ
                     atomic_json(c["status"], dict(updated=time.time(), state="running" if frame is not None else "no_signal",
                                 frames=frames, saved_events=saved, zone_identities=last_identity,
                                 active=engine.active is not None, replay=bool(video),
+                                active_identity=engine.identity()[0],
+                                tracking="ByteTrack" if tracker else None,
                                 alignment=alignment.status if alignment else None,
                                 identity_scene_luma=scene_luma,
                                 identity_low_light=not light_ok,
                                 identity_mode="night" if night else "day",
                                 inference_ms_p50=round(float(np.median(durations))*1000, 1) if durations else None,
-                                inference_ms_p95=round(float(np.percentile(durations,95))*1000, 1) if durations else None))
+                                inference_ms_p95=round(float(np.percentile(durations,95))*1000, 1) if durations else None),
+                                tolerate_busy_replace=True)
                     last_heartbeat = now
                 if not video:
                     time.sleep(max(0, 1 / c["inference_fps"] - (time.monotonic() - now)))
         except BaseException as exc:
             error = type(exc).__name__
+            error_detail = str(exc)
             raise
         finally:
             event = engine.finish("error" if error else "stopped")
@@ -285,12 +363,19 @@ def run(c, preview=False, video=None, seconds=None, web_preview=False, stop_requ
             store.close()
             cv2.destroyAllWindows()
             final_state = "alignment_stop" if alignment_stop else "error" if error else "stopped"
-            atomic_json(c["status"], dict(updated=time.time(), state=final_state,
-                        error=error, frames=frames, saved_events=saved, replay=bool(video),
-                        alignment=alignment.status if alignment else None,
-                        inference_ms_p50=round(float(np.median(durations))*1000, 1) if durations else None))
-            for s, handler in old_handlers.items():
-                signal.signal(s, handler)
+            try:
+                atomic_json(c["status"], dict(updated=time.time(), state=final_state,
+                            error=error, error_detail=error_detail, frames=frames, saved_events=saved,
+                            replay=bool(video), alignment=alignment.status if alignment else None,
+                            inference_ms_p50=round(float(np.median(durations))*1000, 1) if durations else None),
+                            tolerate_busy_replace=True)
+            except OSError:
+                if error is None:
+                    raise
+                logging.exception("Could not write final collector status")
+            finally:
+                for s, handler in old_handlers.items():
+                    signal.signal(s, handler)
         print(f"处理 {frames} 帧，保存 {saved} 条候选事件。")
 
 

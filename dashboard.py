@@ -61,24 +61,34 @@ def show_live():
             else:
                 st.info("等待摄像头画面。请确认采集程序正在运行且 C920 已连接。")
     with results:
-        st.subheader("YOLO 判断")
+        st.subheader("实时判断")
         if preview and time.time() - status.get("updated", 0) < 8:
             if status.get("identity_mode") == "night":
                 st.caption("身份识别 · 夜间模式")
+            if status.get("tracking"):
+                st.caption(f"目标跟踪 · {status['tracking']}")
             if status.get("identity_low_light"):
-                st.warning("画面过暗，检测到的猫按身份未知记录。")
+                st.warning("画面过暗，本帧无法提供新的身份依据。")
+            if status.get("active"):
+                active_name = status.get("active_identity")
+                label = active_name if active_name in c["cats"] else "身份待确认"
+                st.write(f"当前进食候选 · **{label}**")
+                if not status.get("zone_identities"):
+                    st.caption("暂未检测到猫在粮区，正在等待确认离开。")
         if not preview:
             st.write("暂无实时结果")
             return
         detections = preview["detections"]
-        st.metric("当前画面中的猫", len(detections))
+        st.metric("本帧检测到的猫", len(detections))
         for cat in detections:
             name = "身份未知" if cat["cat"] == "unknown" else cat["cat"]
             if alignment.get("state") == "retrying":
                 zone = "机位复核中"
             else:
                 zone = "在吃猫粮区" if cat["in_zone"] else "在吃猫粮区外"
-            st.write(f"**#{cat['index']} {name}** · {zone}")
+            track = f" · 轨迹 {cat['track_id']}" if cat.get("track_id") is not None else ""
+            carried = "（沿用轨迹身份）" if cat.get("inherited") else ""
+            st.write(f"**#{cat['index']} {name}**{carried} · {zone}{track}")
         st.caption(f"本帧检测与身份匹配 {preview['inference_ms']:.1f} ms")
         st.caption("YOLO 检测猫，毛色样本用于匹配名字。")
 
@@ -152,10 +162,17 @@ def show_records():
 
     start_day = datetime.now(TZ).date() - timedelta(days=days - 1)
     start_ts = datetime.combine(start_day, datetime.min.time(), TZ).timestamp()
+    snapshot_ids = []
     try:
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
-            df = pd.read_sql_query("SELECT * FROM events WHERE kind = ? AND start_ts >= ? ORDER BY start_ts DESC",
-                                   conn, params=[FEEDING_EVENT, start_ts])
+            df = pd.read_sql_query(
+                "SELECT id, camera_id, start_ts, end_ts, observed_seconds, cat, identity_ratio, ambiguous, "
+                "end_reason, review, kind, reviewed_cat FROM events WHERE kind = ? AND start_ts >= ? "
+                "ORDER BY start_ts DESC", conn, params=[FEEDING_EVENT, start_ts])
+            if any(row[1] == "snapshot_jpeg" for row in conn.execute("PRAGMA table_info(events)")):
+                snapshot_ids = [row[0] for row in conn.execute(
+                    "SELECT id FROM events WHERE kind = ? AND start_ts >= ? AND snapshot_jpeg IS NOT NULL "
+                    "ORDER BY start_ts DESC", (FEEDING_EVENT, start_ts))]
     except (sqlite3.Error, pd.errors.DatabaseError):
         st.warning("暂时无法读取 SQLite，页面会自动重试。")
         return
@@ -188,6 +205,19 @@ def show_records():
                  column_config={"cat": "模型身份", "observed_seconds": "有效观测秒", "review": "复核状态"},
                  hide_index=True)
     st.download_button("导出当前事件 CSV", df.to_csv(index=False).encode("utf-8-sig"), "feeding-events.csv", "text/csv")
+    if snapshot_ids:
+        with st.expander("查看进食事件截图"):
+            snapshot_id = st.selectbox("截图对应事件", snapshot_ids, index=None, key="snapshot_event")
+            if snapshot_id is not None:
+                try:
+                    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
+                        row = conn.execute("SELECT snapshot_jpeg, snapshot_ts FROM events WHERE id = ?",
+                                           (snapshot_id,)).fetchone()
+                    if row and row[0]:
+                        taken = datetime.fromtimestamp(row[1], TZ).strftime("%Y-%m-%d %H:%M:%S")
+                        st.image(io.BytesIO(row[0]), caption=f"事件 #{snapshot_id} · {taken}")
+                except sqlite3.Error:
+                    st.warning("暂时无法读取截图。")
     with st.expander("人工复核 / 修正身份"):
         st.caption("请结合现场观察或独立拍摄的测试视频复核。")
         with st.form("review"):

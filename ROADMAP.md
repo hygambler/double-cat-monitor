@@ -16,7 +16,7 @@ C920 最新帧 → YOLO26n-seg 猫分割 → 日夜样本匹配 → 粮区状态
 | --- | --- | --- |
 | **① 启动与配置**：[__main__.py](catwatch/__main__.py)、[config.windows.json](config.windows.json) | 系统的“总指挥”：读取配置，启动摄像头、模型和看板，协调各模块，处理退出 | Python 函数、条件判断、循环；命令行参数；JSON 配置；文件路径；进程启动与停止 |
 | **② 摄像头采集**：[capture.py](catwatch/capture.py) | 系统的“眼睛”：从 C920 连续取帧，保留最新画面，断流后尝试重连 | 图像是像素数组；分辨率、帧率；OpenCV；线程；共享数据与锁；时间戳 |
-| **③ 猫咪检测与轮廓分割**：[vision.py](catwatch/vision.py) 中的 `Detector` | 判断画面哪里有猫，并标出属于猫身体的像素 | 模型加载与推理；检测框；分割掩膜；置信度；CPU/GPU；模型输入尺寸 |
+| **③ YOLO26n 猫咪检测与轮廓分割**：[vision.py](catwatch/vision.py#L97) 中的 `Detector` | 把摄像头画面交给 `yolo26n-seg.pt`，筛选 `cat` 类，得到每只猫的检测框、分割掩膜和检测分数 | Ultralytics 模型加载与推理、检测框、分割掩膜、置信度、CPU/GPU、模型输入尺寸 |
 | **④ 特征提取与身份识别**：[vision.py](catwatch/vision.py) 中的 `descriptor`、`coat_pattern`、`identify`、`identify_night`，以及启动流程中的日夜模式选择 | 从猫身体提取毛色和花纹，与样本比较，判断“冲冲／白猫／未知”；按日夜使用相应识别方法 | LAB 颜色空间；直方图；灰度与相对亮度；局部图像分块；特征向量；相似度、距离与阈值 |
 | **⑤ 样本采集与登记**：[__main__.py](catwatch/__main__.py) 中的 `snapshot`、`enroll` 命令处理 | 给两只猫建立日间、夜间“参考档案”，供身份程序匹配 | 图像读写；样本标签；特征保存；JSON；样本多样性；校准数据与测试数据的区别 |
 | **⑥ 区域与事件判断**：[vision.py](catwatch/vision.py) 的 `in_zone`、[core.py](catwatch/core.py) 的 `VisitEngine` | 判断猫是否进入粮区，把连续画面整理成一次候选进食事件，计算有效观测时长并汇总身份 | 区域坐标；像素覆盖比例；状态机；时间间隔；短暂漏检容忍；身份投票；歧义处理 |
@@ -25,6 +25,12 @@ C920 最新帧 → YOLO26n-seg 猫分割 → 日夜样本匹配 → 粮区状态
 | **⑨ 数据保存与展示**：[core.py](catwatch/core.py)、[live.py](catwatch/live.py)、[dashboard.py](dashboard.py) | 保存事件、传递实时预览，并展示分猫统计、人工复核和 CSV 导出 | SQLite 数据库；SQL 查询；事务与 WAL；JPEG、Base64；Pandas 数据处理；Streamlit 网页；定时刷新 |
 | **⑩ 自动测试**：[tests 目录](tests) | 检查修改后是否破坏原有功能，例如时长计算、夜间身份判断、机位保护和看板复核 | pytest；断言；测试样本；模拟设备；单元测试与流程测试；回归测试 |
 | **⑪ 部署、保护与项目接续**：[process_lock.py](catwatch/process_lock.py)、[WINDOWS_SETUP.md](WINDOWS_SETUP.md)、[PROJECT_STATUS.md](PROJECT_STATUS.md) | 安装运行环境，避免重复启动采集，并记录项目进度供人或其他 agent 接手 | 虚拟环境；依赖管理；PyTorch/CUDA；Windows 启动脚本；文件锁；Git/GitHub；技术文档 |
+
+### 从哪里读 YOLO26 代码
+
+1. [config.windows.json](config.windows.json#L7) 指定本机模型权重 `data/yolo26n-seg.pt`、输入尺寸和检测阈值。[pyproject.toml](pyproject.toml#L6) 声明提供 YOLO 的 `ultralytics` 依赖。`.pt` 保存模型权重，模型实现随依赖安装。
+2. [vision.py 的 `Detector`](catwatch/vision.py#L97) 用 `YOLO(...)` 加载权重。每次拿到一帧，[`_detect()`](catwatch/vision.py#L114) 调用 `self.model.predict(...)`。检测框表示猫在画面里的大致位置，分割掩膜标记该猫身体所占的像素，检测分数用于判断本次猫检测的可信度。
+3. [监控主循环](catwatch/__main__.py#L231) 把检测结果交给后续逻辑。[ByteTrack](catwatch/tracking.py) 用检测框关联前后帧中的同一只猫。`descriptor()` 用掩膜提取毛色和花纹，`identify()` 或 `identify_night()` 再与样本比对，给出冲冲、白猫或未知。粮区规则和 `VisitEngine` 负责统计候选进食事件。
 
 ### 阅读与参与顺序
 

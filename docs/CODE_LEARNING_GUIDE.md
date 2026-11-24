@@ -6,59 +6,60 @@
 
 ## 1. 先看整套系统怎么工作
 
+流程框内标出负责该步骤的文件，关键步骤还标出函数。`dashboard.py` 位于项目根目录，其余图中的 `.py` 文件位于 `catwatch/`。图下的代码链接可以直接打开对应行。
+
 ### 图 1 · 从双击启动到浏览器显示
 
 ```mermaid
 flowchart TD
-    A["双击 webapp_windows.bat"] --> B["main 读取 config.windows.json"]
-    B --> C["web 启动 Streamlit 子进程"]
-    B --> D["run 取得采集锁并加载模型、样本和机位基准"]
-    D --> E["C920 后台采集线程只保留最新帧"]
-    E --> F["机位校验与 YOLO26n 分割"]
-    F --> G["ByteTrack 关联轨迹，样本匹配判断身份"]
-    G --> H["粮区规则和 VisitEngine 汇总事件"]
-    H --> I[("SQLite 历史事件与截图")]
-    G --> J["最新预览与采集状态 JSON"]
-    H --> J
-    I --> C
-    J --> C
-    C --> K["本机浏览器 127.0.0.1:8501"]
-    C -->|"提交人工复核"| I
-    C -->|"写对焦请求"| L["对焦请求与回读 JSON"]
-    L -->|"采集线程应用设置"| E
-    E -->|"回读摄像头参数"| L
-    L --> C
+    A["双击启动脚本<br/>scripts/webapp_windows.bat"] --> B["读取 Windows 配置<br/>\_\_main\_\_.py · main()<br/>core.py · load_config()"]
+    B --> C["启动 Streamlit 子进程<br/>\_\_main\_\_.py · web()"]
+    C --> D["取得采集锁，初始化机位、模型和样本<br/>\_\_main\_\_.py · run()<br/>process_lock.py · collector_lock()"]
+    D --> E["C920 采集线程保留最新帧<br/>capture.py · LiveCapture"]
+    E --> F["校验机位，检测和分割猫<br/>alignment.py · Alignment.check()<br/>vision.py · Detector"]
+    F --> G["关联轨迹，判断是哪只猫<br/>tracking.py · CatTracker<br/>vision.py · identify() / identify_night()"]
+    G --> H["判断入区并汇总事件<br/>vision.py · in_zone()<br/>core.py · VisitEngine"]
+    H --> I[("写 SQLite 历史事件与可选截图<br/>core.py · Store.save()<br/>live.py · encode_event_snapshot()")]
+    H --> J["写最新预览与采集状态 JSON<br/>live.py · publish_preview()<br/>\_\_main\_\_.py · run()"]
+    C -.->|"提供网页"| K["浏览器显示工作台<br/>dashboard.py · show_live() / show_records()"]
+    I --> K
+    J --> K
+    K -->|"提交人工复核"| I
+    K -->|"写对焦请求"| L["调整焦点并回读结果<br/>focus.py · request_focus() / FocusControl.poll()<br/>capture.py · LiveCapture"]
+    L -->|"显示回读"| K
 ```
 
-主进程运行采集与识别，另起一个 Streamlit 进程读预览和事件。关闭浏览器标签后采集会继续。关闭一体化启动终端或电脑休眠会中断监测。手机外网访问需要另行接入；这个入口绑定的是本机地址。[Windows 启动脚本](../scripts/webapp_windows.bat#L11) · [两个进程如何启动](../catwatch/__main__.py#L382)
+主进程运行采集与识别，另起一个 Streamlit 进程读预览和事件。关闭浏览器标签后采集会继续。关闭一体化启动终端或电脑休眠会中断监测。手机外网访问需要另行接入；这个入口绑定的是本机地址。[Windows 启动脚本](../scripts/webapp_windows.bat#L11) · [两个进程如何启动](../catwatch/__main__.py#L382) · [采集线程](../catwatch/capture.py#L31) · [实时看板](../dashboard.py#L33) · [对焦处理](../catwatch/focus.py#L29)
 
 ### 图 2 · 一帧画面怎么变成一条观察
 
 ```mermaid
 flowchart TD
-    A["读取最新画面"] --> B{"有新帧且画面未过期？"}
-    B -->|"否"| C["记录无可用帧，向事件状态机提交空观察"]
-    B -->|"是"| D{"机位检查结果"}
-    D -->|"偏移过大或复核超时"| E["结算当前事件并停止采集"]
-    D -->|"复核中"| F["可以显示检测，暂时停用粮区"]
-    D -->|"通过或已关闭检查"| G["使用有效粮区"]
-    F --> H["YOLO 输出 cat 检测框、掩膜、分数"]
+    A["读取最新画面<br/>capture.py · LiveCapture.latest()"] --> B{"有新帧且画面未过期？<br/>\_\_main\_\_.py · run()"}
+    B -->|"否"| C["提交空观察并标记无可用帧<br/>\_\_main\_\_.py · run()"]
+    B -->|"是"| D{"机位检查结果<br/>alignment.py · Alignment.check()"}
+    D -->|"偏移过大或复核超时"| E["结算当前事件并停止采集<br/>\_\_main\_\_.py · run()<br/>core.py · VisitEngine.finish()"]
+    D -->|"复核中"| F["继续检测，暂停粮区统计<br/>\_\_main\_\_.py · run()"]
+    D -->|"通过或已关闭检查"| G["使用有效粮区<br/>\_\_main\_\_.py · run()"]
+    F --> H["YOLO 输出猫框、掩膜和分数<br/>vision.py · Detector._detect()"]
     G --> H
-    H --> I["ByteTrack 用框关联同一条轨迹"]
-    I --> J{"检测足够可靠且画面亮度足够？"}
-    J -->|"是"| K["用掩膜提取毛色和花纹，做日间或夜间匹配"]
-    J -->|"否"| L["本帧身份为未知"]
-    I --> M["用猫掩膜计算粮区覆盖比例"]
-    K --> N["检查同轨迹能否短时沿用身份"]
+    H --> I["ByteTrack 用检测框关联轨迹<br/>tracking.py · CatTracker.update()"]
+    I --> J{"检测可靠且亮度足够？<br/>\_\_main\_\_.py · run()<br/>vision.py · scene_luminance()"}
+    J -->|"是"| K["提取毛色和花纹，匹配日间或夜间样本<br/>vision.py · descriptor()<br/>vision.py · identify() / identify_night()"]
+    J -->|"否"| L["本帧原始身份为未知<br/>vision.py · identify() / identify_night()"]
+    I --> M["按掩膜覆盖比例判断是否入区<br/>vision.py · in_zone()"]
+    K --> N["检查能否沿用同一轨迹的身份<br/>tracking.py · CatTracker.resolve()"]
     L --> N
-    M --> O["汇总本帧入区身份"]
+    M --> O["汇总本帧入区身份<br/>\_\_main\_\_.py · run()"]
     N --> O
-    O --> P["VisitEngine 更新时长、投票，必要时结算"]
+    O --> P["累计有效时长与身份票，必要时结算<br/>core.py · VisitEngine.tick()"]
     C --> P
-    P --> Q["事件达门槛后入库，实时预览继续覆盖"]
+    P -->|"有已结算事件"| Q["保存事件<br/>core.py · Store.save()"]
+    E -->|"有已结算事件"| Q
+    O -->|"开启网页预览"| R["覆盖最近一帧预览<br/>live.py · publish_preview()"]
 ```
 
-读图时记住四个中间结果。**检测框**是一只猫的大致位置。**分割掩膜**是与画面对齐的像素标记。**轨迹编号**把多帧里连续出现的框串起来。**猫名**是样本匹配和事件综合判断的结果。[检测输出](../catwatch/vision.py#L114) · [主循环如何接起来](../catwatch/__main__.py#L231)
+读图时记住四个中间结果。**检测框**是一只猫的大致位置。**分割掩膜**是与画面对齐的像素标记。**轨迹编号**把多帧里连续出现的框串起来。**猫名**是样本匹配和事件综合判断的结果。[主循环](../catwatch/__main__.py#L198) · [机位检查](../catwatch/alignment.py#L167) · [检测输出](../catwatch/vision.py#L114) · [轨迹关联与身份沿用](../catwatch/tracking.py#L18) · [事件计时](../catwatch/core.py#L120)
 
 ## 2. 按代码块读项目
 
@@ -120,17 +121,19 @@ ByteTrack 开启时，预测会先保留低至 `0.10` 的候选框供跟踪关�
 
 日间样本库是 `data/profiles.json`，夜间是 `data/night-profiles.json`。`snapshot` 获取一张照片。`enroll` 对每张照片调用同一个 YOLO 分割器，要求恰好检出一只猫，再调用 `descriptor()`。每只猫每个模式至少 3 张，同一个名字再次登记会替换该猫在该库中的特征列表。采集程序启动时加载日夜库，两只猫的名字必须与配置对应。登记会更新样本特征，原有 `yolo26n-seg.pt` 仍是检测用的模型权重。[样本登记](../catwatch/__main__.py#L74) · [样本库加载](../catwatch/vision.py#L135) · [夜间命令](../catwatch/__main__.py#L452)
 
+**图 3 · 单猫照片怎么变成日夜样本库**
+
 ```mermaid
-flowchart LR
-    A["C920 单猫现场照"] --> B["给照片标注猫名与光照"]
-    B --> C["enroll 逐张调用 YOLO 分割"]
-    C --> D{"恰好一只猫且掩膜足够大？"}
-    D -->|"否"| E["登记报错，检查照片"]
-    D -->|"是"| F["descriptor 生成数值特征"]
-    F --> G["按猫名保存至少三个样本"]
-    G -->|"enroll"| H["profiles.json 日间库"]
-    G -->|"enroll --night"| I["night-profiles.json 夜间库"]
-    H --> J["采集程序启动时加载"]
+flowchart TD
+    A["保存 C920 单猫现场照<br/>\_\_main\_\_.py · snapshot 命令"] --> B["输入猫名，选择日间或夜间<br/>\_\_main\_\_.py · enroll / --night"]
+    B --> C["逐张调用 YOLO 分割<br/>\_\_main\_\_.py · enroll()<br/>vision.py · Detector.detect()"]
+    C --> D{"恰好一只猫且掩膜足够大？<br/>\_\_main\_\_.py · enroll()<br/>vision.py · descriptor()"}
+    D -->|"否"| E["登记报错，检查照片<br/>\_\_main\_\_.py · enroll()"]
+    D -->|"是"| F["提取毛色和花纹特征<br/>vision.py · descriptor()"]
+    F --> G["每只猫至少三个样本，按猫名保存<br/>\_\_main\_\_.py · enroll()<br/>core.py · atomic_json()"]
+    G -->|"enroll"| H["写 profiles.json 日间库<br/>\_\_main\_\_.py · enroll()"]
+    G -->|"enroll --night"| I["写 night-profiles.json 夜间库<br/>\_\_main\_\_.py · enroll()"]
+    H --> J["采集启动时加载样本<br/>\_\_main\_\_.py · run()<br/>vision.py · load_profiles()"]
     I --> J
 ```
 
@@ -142,21 +145,23 @@ flowchart LR
 
 `VisitEngine.tick()` 接收时间、粮区身份列表、日夜模式及画面可用状态。第一次入区开一个活动事件。相邻两次都有入区观察时，才累计这两次的间隔，单步上限是 `1.5 / inference_fps`，Windows 当前是 0.75 秒。两次观察之间若有漏检或无帧，空档不会计入有效观测。事件结束时用最后一次有效入区观察作为结束时间。[状态机主逻辑](../catwatch/core.py#L120) · [事件结算](../catwatch/core.py#L170)
 
+**图 4 · 一次到访如何变成数据库事件**
+
 ```mermaid
 stateDiagram-v2
-    state "等待入区" as Idle
-    state "活动事件" as Active
-    state "短时等待恢复" as Gap
-    state "结算和投票" as Finish
-    state "保存到 SQLite" as Save
-    state "短事件丢弃" as Drop
+    state "等待入区 · core.py / tick()" as Idle
+    state "活动事件 · core.py / tick()" as Active
+    state "短时等待恢复 · core.py / tick()" as Gap
+    state "结算和投票 · core.py / finish() 与 identity()" as Finish
+    state "保存到 SQLite · core.py / Store.save()" as Save
+    state "短事件丢弃 · core.py / finish()" as Drop
     [*] --> Idle
     Idle --> Active: 入区观察启动事件
     Active --> Active: 连续观察累计有效时长
     Active --> Gap: 漏检或短暂无帧
     Gap --> Active: 宽限内重新出现
     Gap --> Finish: 超过宽限或持续断流
-    Active --> Finish: 可信离区、轨迹换人、机位变化或正常退出
+    Active --> Finish: 可信离区、轨迹换人、机位变化或正常退出<br/>\_\_main\_\_.py / run()
     Finish --> Save: 有效观察至少 3 秒
     Finish --> Drop: 有效观察不足 3 秒
     Save --> Idle: 继续运行时
